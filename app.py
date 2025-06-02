@@ -1,223 +1,107 @@
-from flask import Flask, request, jsonify
-import time
+import streamlit as st
 import pandas as pd
-import torch
-import pickle
-import re
-import gdown
-import os
-from transformers import AutoTokenizer
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
+import plotly.express as px
+import requests
+from urllib.parse import urlparse, urlunparse
 
-app = Flask(__name__)
+# ===============================
+# 🔧 Fungsi Format URL
+# ===============================
+def clean_url(url):
+    parsed_url = urlparse(url)
+    return urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, "", "", ""))
 
-# 🔄 Download Model jika belum ada
-FILE_ID = "1--lgnyJervVJXzYNS-Fv5xrgy6EdVBkp"
-MODEL_PATH = "saved_re_train.pkl"
-MODEL_TOKENIZER = "cahya/bert-base-indonesian-522M"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_TOKENIZER)
+def format_review_url(url):
+    url = clean_url(url)
+    return url.rstrip("/") + "/review" if "/review" not in url else url
 
-if not os.path.exists(MODEL_PATH):
-    gdown.download(f"https://drive.google.com/uc?id={FILE_ID}", MODEL_PATH, quiet=False)
+# ===============================
+# 🎨 Konfigurasi Streamlit
+# ===============================
+st.set_page_config(page_title="Deteksi Review Palsu Tokopedia", page_icon="🛒", layout="wide")
 
-with open(MODEL_PATH, "rb") as f:
-    model = pickle.load(f)
+# ===============================
+# 🧭 Sidebar Navigasi
+# ===============================
+menu = st.sidebar.selectbox("📌 Navigasi", ["🔍 Deteksi Review", "📖 Panduan Pengguna"])
 
-model.to(device)
-model.eval()
+# ===============================
+# 📖 Panduan Pengguna
+# ===============================
+if menu == "📖 Panduan Pengguna":
+    st.title("📖 Panduan Pengguna")
+    st.markdown("""
+    Selamat datang di aplikasi **Deteksi Review Palsu Tokopedia**!  
+    Berikut adalah langkah-langkah untuk menggunakan aplikasi ini:
 
-# 🔍 Fungsi pendeteksi pola ulasan palsu
-def is_emoji_only(text):
-    emoji_pattern = re.compile(r"^[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F700-\U0001F77F]+$")
-    return bool(emoji_pattern.match(text))
+    1. **Salin URL** produk dari situs Tokopedia.
+    2. Tempelkan ke dalam kolom input di menu **Deteksi Review**.
+    3. Klik tombol **"Mulai Deteksi"**.
+    4. Tunggu beberapa saat hingga hasil scraping dan prediksi selesai.
+    5. Lihat ringkasan visual dan detail ulasan yang terdeteksi.
+    6. Kamu bisa mengunduh data hasil deteksi dalam format CSV.
 
-def pf2_check(review):
-    review = review.strip()
-    if not review:
-        return False
-    
-    sentences = re.split(r'[.!?]+', review)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    
-    if len(sentences) == 0:
-        return False
-    
-    words_per_sentence = [len(s.split()) for s in sentences]
-    avg_words_per_sentence = sum(words_per_sentence) / len(words_per_sentence)
-    
-    words = review.split()
-    avg_word_length = sum(len(w) for w in words) / len(words)
-    
-    MIN_AVG_WORDS_PER_SENTENCE = 5    
-    MIN_AVG_WORD_LENGTH = 4.0          
-    
-    return avg_words_per_sentence >= MIN_AVG_WORDS_PER_SENTENCE and avg_word_length >= MIN_AVG_WORD_LENGTH
+    """)
+    st.info("Hubungi Pihak Website jika mengalami kendala.")
 
-def is_exactly_generic_phrase(text):
-    generic_phrases = {
-        "ok", "oke", "sip", "mantap", "nice", "good", "top", "not", "sesuai"
-    }
-    return text.strip().lower() in generic_phrases
+# ===============================
+# 🔍 Menu Deteksi Review
+# ===============================
+elif menu == "🔍 Deteksi Review":
+    st.title("🛍️ Deteksi Review Palsu Tokopedia 🤖")
 
-def looks_natural(review):
-    review = review.lower()
-    word_count = len(review.split())
+    url_input = st.text_input("🔗 Masukkan URL produk Tokopedia:")
+    start_button = st.button("🚀 Mulai Deteksi")
 
-    natural_keywords = [
-        "bagus", "keren","mantap", "kualitas oke", "pas di badan", "adem",
-        "nyaman dipakai", "lembut", "halus", "enak dipakai", "bagus banget", "real pict",
-        "gak nyesel beli", "recommended", "puas", "ukuran pas", "sesuai deskripsi",
-        "sesuai gambar", "cutting rapi", "tipis tapi nyaman", "ringan di badan",
-        "warna sesuai", "motifnya bagus", "jatuhnya bagus di badan",
-        "cepat sampai", "pengiriman cepat", "dikirim hari itu juga", "packaging rapi",
-        "packing aman", "barang sampai dengan selamat", "sesuai estimasi", "fast respon",
-        "seller ramah", "penjual ramah", "respon cepat", "CS responsif", "penjualnya baik",
-        "bahannya adem dan nyaman banget", "suka banget sama bajunya",
-        "bakal order lagi deh", "baru nyoba dan langsung suka",
-        "beli buat seragaman, cocok semua", "cocok buat dipakai harian",
-        "pas di badan, nggak kegedean/kekecilan",
-        "beli karena lihat review, ternyata beneran bagus",
-        "next order lagi", "baru sampai langsung coba, puas banget"
-    ]
-
-    has_punctuation = any(p in review for p in [".", ",", "...", "!"])
-
-    if word_count >= 5 and has_punctuation:
-        if any(word in review for word in natural_keywords):
-            return True
-    return False
-
-# 🔍 Fungsi utama klasifikasi ulasan + alasan
-def predict_review_label(review, image_url=None):
-    review = review.strip()
-
-    if is_emoji_only(review):
-        return "Fake", "Hanya mengandung emoji"
-
-    if pf2_check(review):
-        return "Real", "Kalimat dan kata cukup panjang serta informatif"
-
-    if len(review.split()) > 10:
-        return "Real", "Review cukup panjang (>10 kata)"
-
-    if image_url:
-        return "Real", "Mengandung foto sebagai bukti"
-
-    if looks_natural(review):
-        return "Real", "Mengandung frasa alami dan tanda baca yang sesuai"
-
-    if is_exactly_generic_phrase(review):
-        return "Fake", "Hanya mengandung frasa umum/generik"
-
-    # Model digunakan jika tidak memenuhi heuristik
-    inputs = tokenizer(review, return_tensors="pt", truncation=True, padding=True, max_length=512)
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    logits = outputs.logits
-    prediction = torch.argmax(logits, dim=-1).item()
-
-    return ("Fake", "Model prediksi: Fake") if prediction == 0 else ("Real", "Model prediksi: Real")
-
-# 🔎 Scraping dan klasifikasi ulasan
-def scrape_reviews(url):
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("user-agent=Mozilla/5.0")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-
-    service = Service()
-    driver = webdriver.Chrome(service=service, options=options)
-    
-    driver.get(url)
-    time.sleep(3)
-    
-    data = []
-    max_reviews = 300
-    reviews_scraped = 0
-    page_number = 1
-
-    def scroll_down():
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(3)
-
-    while reviews_scraped < max_reviews:
-        scroll_down()
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        
-        containers = soup.find_all('div', class_='css-1k41fl7')
-        
-        if not containers:
-            print(f"[INFO] Tidak ada container ditemukan di halaman {page_number}")
-            break
-
-        for container in containers:
-            if reviews_scraped >= max_reviews:
-                break
-            try:
-                user = container.find('span', class_='name')
-                review = container.find('span', attrs={'data-testid': 'lblItemUlasan'})
-                rating_stars = container.find_all('svg', attrs={'fill': 'var(--YN300, #FFD45F)'})
-                image_tag = container.find('img', attrs={'data-testid': 'imgItemPhotoulasan'})
-
-                if user and review:
-                    username = user.text.strip()
-                    review_text = review.text.strip()
-                    rating = len(rating_stars)
-                    image_url = image_tag['src'] if image_tag else None
-
-                    label, reason = predict_review_label(review_text, image_url)
-                    data.append({
-                        "User": username,
-                        "Review": review_text,
-                        "Rating": rating,
-                        "Category": label,
-                        "Reason": reason,
-                        "Image URL": image_url
-                    })
-                    reviews_scraped += 1
-            except Exception as e:
-                print(f"[WARNING] Gagal memproses 1 ulasan: {e}")
-                continue
+    if start_button and url_input:
+        formatted_url = format_review_url(url_input)
+        st.write(f"🔗 **URL yang diformat:** [{formatted_url}]({formatted_url})")
+        st.write("⏳ Mencari Data dan Memprediksi")
 
         try:
-            next_button = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "button[aria-label^='Laman berikutnya']"))
-            )
-            if next_button.is_enabled():
-                driver.execute_script("arguments[0].click();", next_button)
-                time.sleep(3)
-                page_number += 1
+            response = requests.post("https://6413-180-249-152-223.ngrok-free.app/scrape", json={"url": formatted_url})
+            if response.status_code != 200:
+                st.error(f"❌ Gagal mengambil data. Kode: {response.status_code}")
             else:
-                break
-        except Exception:
-            break
+                results = response.json()
 
-    driver.quit()
-    return data
+                if not results:
+                    st.warning("⚠️ Tidak ada ulasan ditemukan.")
+                else:
+                    df = pd.DataFrame(results)
+                    st.session_state["scraped_data"] = df
+                    st.session_state["scraping_done"] = True
 
-# 🔗 API endpoint
-@app.route('/scrape', methods=['POST'])
-def scrape_and_detect():
-    url = request.json.get('url')
-    if not url:
-        return jsonify({"error": "URL tidak diberikan"}), 400
+        except requests.exceptions.RequestException as e:
+            st.error(f"⚠️ Gagal terhubung ke server lokal: {e}")
 
-    reviews = scrape_reviews(url)
-    return jsonify(reviews)
+    # ===============================
+    # 📊 Tampilkan Hasil Jika Ada
+    # ===============================
+    if st.session_state.get("scraping_done"):
+        df = st.session_state["scraped_data"]
+        real_count = df[df["Category"] == "Real"].shape[0]
+        fake_count = df[df["Category"] == "Fake"].shape[0]
+        total_reviews = real_count + fake_count
+        real_percentage = (real_count / total_reviews) * 100 if total_reviews > 0 else 0
 
-# ▶️ Jalankan server Flask
-if __name__ == '__main__':
-    app.run(debug=True, host="0.0.0.0", port=5000)
+        fig = px.pie(
+            names=["Real", "Fake"],
+            values=[real_count, fake_count],
+            title="Distribusi Ulasan Real vs Fake",
+            color_discrete_sequence=["blue", "red"]
+        )
+
+        st.subheader("📊 Ringkasan Analisis")
+        st.plotly_chart(fig)
+        st.dataframe(df)
+
+        # if real_percentage >= 70:
+        #     st.success(f"✅ Produk ini **layak dibeli** (Real Reviews: {real_percentage:.2f}%)")
+        # elif 50 <= real_percentage < 70:
+        #     st.warning(f"⚠️ Produk ini **perlu dipertimbangkan** (Real Reviews: {real_percentage:.2f}%)")
+        # else:
+        #     st.error(f"❌ Produk ini **tidak layak dibeli** (Real Reviews: {real_percentage:.2f}%)")
+
+        csv_file = df.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Unduh CSV", data=csv_file, file_name="tokopedia_reviews.csv", mime="text/csv")
