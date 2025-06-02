@@ -59,7 +59,7 @@ elif menu == "🔍 Deteksi Review":
         st.write("⏳ Mencari Data dan Memprediksi")
 
         try:
-            response = requests.post("http://127.0.0.1:5000/scrape", json={"url": formatted_url})
+            response = requests.post(" https://51d0-180-249-152-223.ngrok-free.app/scrape", json={"url": formatted_url})
             if response.status_code != 200:
                 st.error(f"❌ Gagal mengambil data. Kode: {response.status_code}")
             else:
